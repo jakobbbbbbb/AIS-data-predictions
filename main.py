@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from supportingFcn import toTime, haversine_distance, submit, stable_hash
+from supportingFcn import toTime, haversine_distance, submit, stable_hash, is_near_port
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import RandomForestRegressor
@@ -18,18 +18,21 @@ df_schedules = pd.read_csv('schedules_to_may_2024.csv', delimiter = '|')
 df_vessels = pd.read_csv('vessels.csv', delimiter = '|')
 
 
-features = ['time', 'vesselId']
+featuresTrain = ['time', 'vesselId']
+featuresTest = ['time', 'vesselId']
 
 # Selecting the features
-X_train = df_train[features]
-X_test = df_test[features]
+X_train = df_train[featuresTrain]
+X_test = df_test[featuresTest]
 # Selecting the predictors
 y_lat = df_train['latitude_vessel']
 y_long = df_train['longitude_vessel']
 
+
 # Splitting time into different features
 X_train = toTime(X_train, 'measured', year = '2024')
 X_test = toTime(X_test, 'measured', year = '2024')
+
 
 # Filling the NaNs for DWT with the mean value and grouping by size
 DWT_mean = df_vessels['DWT'].mean()
@@ -46,20 +49,19 @@ length_encoder = LabelEncoder()
 df_vessels['length_grouped_encoded'] = length_encoder.fit_transform(df_vessels['length_grouped'])
 
 # Enriching test/train dataset based on vesselId
-X_train = X_train.merge(df_vessels[['vesselId', 'DWT_grouped_encoded', 'length_grouped_encoded']], on = 'vesselId', how = 'left')
-X_test = X_test.merge(df_vessels[['vesselId', 'DWT_grouped_encoded', 'length_grouped_encoded']], on = 'vesselId', how = 'left')
+X_train = X_train.merge(df_vessels[['vesselId', 'DWT_grouped_encoded', 'length_grouped_encoded', 'GT']], on = 'vesselId', how = 'left')
+X_test = X_test.merge(df_vessels[['vesselId', 'DWT_grouped_encoded', 'length_grouped_encoded', 'GT']], on = 'vesselId', how = 'left')
 
 # Encoding vesselId
 X_train['vesselId_encoded'] = X_train['vesselId'].apply(stable_hash)
 X_test['vesselId_encoded'] = X_test['vesselId'].apply(stable_hash)
-X_train.drop(['vesselId', 'hour', 'minute', 'second'], axis = 1, inplace = True)
-X_test.drop(['vesselId', 'hour', 'minute', 'second'], axis = 1, inplace = True)
+X_train.drop(['vesselId', 'hour', 'minute', 'second', 'time'], axis = 1, inplace = True)
+X_test.drop(['vesselId', 'hour', 'minute', 'second', 'time'], axis = 1, inplace = True)
 
 
 def runModelforKaggle(X_train, X_test, y_lat, y_long):
-
     params = {
-        'n_estimators': 10,
+        'n_estimators': 30,
         'learning_rate': 1,
         'max_depth': 50,
         'random_state': 42,
@@ -92,7 +94,7 @@ def runXGBModelforTesting(X, y_lat, y_long):
     )
     # Hyperparameters
     params = {
-        'n_estimators': 10,
+        'n_estimators': 30,
         'learning_rate': 1,
         'max_depth': 50,
         'random_state': 42,
@@ -229,11 +231,9 @@ def runGridCV(X, y_lat, y_long):
 
     # Hyperparameter grid
     param_grid = {
-        'n_estimators': [50, 100, 200, 500, 1000],
-        'learning_rate': [0.01, 0.1, 0.3, 1],
-        'max_depth': [3, 5, 7, 10, 15, 20],
-        'reg_alpha': [0, 0.5, 1],
-        'reg_lambda': [1, 2, 5]
+        'n_estimators': [10, 20, 30],
+        'learning_rate': [0.01, 0.1, 1],
+        'max_depth': [20, 50, 80]
     }
 
     # Initializing XGBRegressor models
@@ -280,7 +280,7 @@ def runGridCV(X, y_lat, y_long):
     #plot_importance(grid_search_lat.best_estimator_)
     #plt.show()
 
-#runModelforKaggle(X_train, X_test, y_lat, y_long)
+runModelforKaggle(X_train, X_test, y_lat, y_long)
 #runXGBModelforTesting(X_train, y_lat, y_long)
 #runTFModelforTesting(X_train, y_lat, y_long)
 #runGridCV(X_train, y_lat, y_long)
