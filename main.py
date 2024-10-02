@@ -18,7 +18,7 @@ df_schedules = pd.read_csv('schedules_to_may_2024.csv', delimiter = '|')
 df_vessels = pd.read_csv('vessels.csv', delimiter = '|')
 
 
-featuresTrain = ['time', 'vesselId']
+featuresTrain = ['time', 'vesselId', 'sog']
 featuresTest = ['time', 'vesselId']
 
 # Selecting the features
@@ -48,14 +48,27 @@ df_vessels['length_grouped'] = pd.qcut(df_vessels['length'], q = 5, labels = ['V
 length_encoder = LabelEncoder()
 df_vessels['length_grouped_encoded'] = length_encoder.fit_transform(df_vessels['length_grouped'])
 
+NT_mean = df_vessels['NT'].mean()
+df_vessels.fillna({'NT': NT_mean}, inplace = True)
+enginepower_mean = df_vessels['enginePower'].mean()
+df_vessels.fillna({'enginePower': enginepower_mean}, inplace = True)
+draft_mean = df_vessels['draft'].mean()
+df_vessels.fillna({'draft': draft_mean}, inplace = True)
+
+avg_sog_vessel = X_train.groupby('vesselId')['sog'].mean().reset_index()
+avg_sog_vessel.columns = ['vesselId', 'avg_sog']
+
 # Enriching test/train dataset based on vesselId
-X_train = X_train.merge(df_vessels[['vesselId', 'DWT_grouped_encoded', 'length_grouped_encoded', 'GT']], on = 'vesselId', how = 'left')
-X_test = X_test.merge(df_vessels[['vesselId', 'DWT_grouped_encoded', 'length_grouped_encoded', 'GT']], on = 'vesselId', how = 'left')
+X_train = X_train.merge(df_vessels[['vesselId', 'DWT', 'length', 'GT', 'NT']], on = 'vesselId', how = 'left')
+X_test = X_test.merge(df_vessels[['vesselId', 'DWT', 'length', 'GT', 'NT']], on = 'vesselId', how = 'left')
+
+X_train = X_train.merge(avg_sog_vessel, on = 'vesselId', how = 'left')
+X_test = X_test.merge(avg_sog_vessel, on = 'vesselId', how = 'left')
 
 # Encoding vesselId
 X_train['vesselId_encoded'] = X_train['vesselId'].apply(stable_hash)
 X_test['vesselId_encoded'] = X_test['vesselId'].apply(stable_hash)
-X_train.drop(['vesselId', 'hour', 'minute', 'second', 'time'], axis = 1, inplace = True)
+X_train.drop(['vesselId', 'hour', 'minute', 'second', 'time', 'sog'], axis = 1, inplace = True)
 X_test.drop(['vesselId', 'hour', 'minute', 'second', 'time'], axis = 1, inplace = True)
 
 
