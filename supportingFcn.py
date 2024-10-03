@@ -78,3 +78,9 @@ def haversine_distance(y_true_lat, y_true_lon, y_pred_lat, y_pred_lon):
 def stable_hash(x):
     return int(hashlib.md5(str(x).encode('utf-8')).hexdigest(), 16) % 10**6
 
+
+def convert_etaRaw_to_full_datetime(eta_raw, time):
+    """Parses etaRaw (MM-DD HH:MM) using the year from arrivalDate and returns a datetime object."""
+    year = time.year  # Extract the year from arrivalDate
+    eta_raw_full = f"{year}-{eta_raw}"  # Add year to etaRaw string
+    return pd.to_datetime(eta_raw_full, format='%Y-%m-%d %H:%M', errors='coerce')

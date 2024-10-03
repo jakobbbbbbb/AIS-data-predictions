@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from supportingFcn import toTime, haversine_distance, submit, stable_hash, is_near_port
+from supportingFcn import toTime, haversine_distance, submit, stable_hash, convert_etaRaw_to_full_datetime
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import RandomForestRegressor
@@ -18,7 +18,7 @@ df_schedules = pd.read_csv('schedules_to_may_2024.csv', delimiter = '|')
 df_vessels = pd.read_csv('vessels.csv', delimiter = '|')
 
 
-featuresTrain = ['time', 'vesselId', 'sog']
+featuresTrain = ['time', 'vesselId', 'sog', 'navstat', 'etaRaw', 'portId']
 featuresTest = ['time', 'vesselId']
 
 # Selecting the features
@@ -28,11 +28,9 @@ X_test = df_test[featuresTest]
 y_lat = df_train['latitude_vessel']
 y_long = df_train['longitude_vessel']
 
-
 # Splitting time into different features
 X_train = toTime(X_train, 'measured', year = '2024')
 X_test = toTime(X_test, 'measured', year = '2024')
-
 
 # Filling the NaNs for DWT with the mean value and grouping by size
 DWT_mean = df_vessels['DWT'].mean()
@@ -55,23 +53,54 @@ df_vessels.fillna({'enginePower': enginepower_mean}, inplace = True)
 draft_mean = df_vessels['draft'].mean()
 df_vessels.fillna({'draft': draft_mean}, inplace = True)
 
-avg_sog_vessel = X_train.groupby('vesselId')['sog'].mean().reset_index()
+# Finding average speed when vessel is in operation
+avg_sog_vessel = X_train[X_train['navstat'] == 0].groupby('vesselId')['sog'].mean().reset_index()
 avg_sog_vessel.columns = ['vesselId', 'avg_sog']
+
 
 # Enriching test/train dataset based on vesselId
 X_train = X_train.merge(df_vessels[['vesselId', 'DWT', 'length', 'GT', 'NT']], on = 'vesselId', how = 'left')
 X_test = X_test.merge(df_vessels[['vesselId', 'DWT', 'length', 'GT', 'NT']], on = 'vesselId', how = 'left')
 
+
 X_train = X_train.merge(avg_sog_vessel, on = 'vesselId', how = 'left')
 X_test = X_test.merge(avg_sog_vessel, on = 'vesselId', how = 'left')
+
+# Filling NaN's in datasets with mean sog
+avg_sog_mean = avg_sog_vessel['avg_sog'].mean()
+X_train.fillna({'avg_sog': avg_sog_mean}, inplace=True)
+X_test.fillna({'avg_sog': avg_sog_mean}, inplace=True)
+
+
+# Saving average delay per vesselId
+df_arrival_times = X_train[['vesselId', 'time', 'navstat', 'etaRaw']].copy()
+df_arrival_times.loc[:, 'time'] = pd.to_datetime(df_arrival_times['time'])
+df_arrival_times.sort_values(by = ['vesselId', 'time'], inplace = True)
+df_arrival_times['prev_navstat'] = df_arrival_times.groupby('vesselId')['navstat'].shift(1)
+df_arrival_times.dropna(axis = 0, inplace = True)
+df_arrival_times = df_arrival_times[(df_arrival_times['prev_navstat'] == 0) & (df_arrival_times['navstat'].isin([1, 5]))]
+df_arrival_times.drop_duplicates(subset = ['vesselId'], keep = 'first', inplace = True)
+df_arrival_times['etaRaw_parsed'] = df_arrival_times.apply(
+    lambda row: convert_etaRaw_to_full_datetime(row['etaRaw'], row['time']), axis=1
+)
+df_arrival_times['arrival_deviation'] = (df_arrival_times['time'] - df_arrival_times['etaRaw_parsed']).dt.total_seconds() / 3600
+df_avg_arrival_deviation = df_arrival_times.groupby('vesselId')['arrival_deviation'].mean().reset_index()
+df_avg_arrival_deviation.rename(columns={'arrival_deviation': 'avg_arrival_deviation'}, inplace=True)
+X_train = X_train.merge(df_avg_arrival_deviation, on = 'vesselId', how = 'left')
+X_test = X_test.merge(df_avg_arrival_deviation, on = 'vesselId', how = 'left')
+
+total_avg_arr_dev = df_avg_arrival_deviation['avg_arrival_deviation'].mean()
+X_train.fillna({'avg_arrival_deviation': total_avg_arr_dev}, inplace = True)
+X_test.fillna({'avg_arrival_deviation': total_avg_arr_dev}, inplace = True)
 
 # Encoding vesselId
 X_train['vesselId_encoded'] = X_train['vesselId'].apply(stable_hash)
 X_test['vesselId_encoded'] = X_test['vesselId'].apply(stable_hash)
-X_train.drop(['vesselId', 'hour', 'minute', 'second', 'time', 'sog'], axis = 1, inplace = True)
-X_test.drop(['vesselId', 'hour', 'minute', 'second', 'time'], axis = 1, inplace = True)
+# Dropping unused columns
+X_train.drop(['vesselId', 'hour', 'minute', 'second', 'time', 'sog', 'navstat', 'NT', 'etaRaw', 'portId'], axis = 1, inplace = True)
+X_test.drop(['vesselId', 'hour', 'minute', 'second', 'time', 'NT'], axis = 1, inplace = True)
 
-
+# NOTE: These are functions for running various tuned models.
 def runModelforKaggle(X_train, X_test, y_lat, y_long):
     params = {
         'n_estimators': 30,
@@ -244,9 +273,11 @@ def runGridCV(X, y_lat, y_long):
 
     # Hyperparameter grid
     param_grid = {
-        'n_estimators': [10, 20, 30],
+        'n_estimators': [30, 50, 100],
         'learning_rate': [0.01, 0.1, 1],
-        'max_depth': [20, 50, 80]
+        'max_depth': [50, 60, 100],
+        'reg_lambda': [0.1, 1, 10],
+        'reg_alpha': [0.1, 1, 10]
     }
 
     # Initializing XGBRegressor models
@@ -293,7 +324,7 @@ def runGridCV(X, y_lat, y_long):
     #plot_importance(grid_search_lat.best_estimator_)
     #plt.show()
 
-runModelforKaggle(X_train, X_test, y_lat, y_long)
-#runXGBModelforTesting(X_train, y_lat, y_long)
+#runModelforKaggle(X_train, X_test, y_lat, y_long)
+runXGBModelforTesting(X_train, y_lat, y_long)
 #runTFModelforTesting(X_train, y_lat, y_long)
 #runGridCV(X_train, y_lat, y_long)
