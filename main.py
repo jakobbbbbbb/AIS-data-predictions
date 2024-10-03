@@ -3,7 +3,7 @@ import numpy as np
 from supportingFcn import toTime, haversine_distance, submit, stable_hash, convert_etaRaw_to_full_datetime
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.cluster import KMeans
 from sklearn.metrics import root_mean_squared_error, r2_score
 import matplotlib.pyplot as plt
 from xgboost import XGBRegressor
@@ -18,7 +18,7 @@ df_schedules = pd.read_csv('schedules_to_may_2024.csv', delimiter = '|')
 df_vessels = pd.read_csv('vessels.csv', delimiter = '|')
 
 
-featuresTrain = ['time', 'vesselId', 'sog', 'navstat', 'etaRaw', 'portId']
+featuresTrain = ['latitude_vessel', 'longitude_vessel', 'time', 'vesselId', 'sog', 'navstat', 'etaRaw', 'portId']
 featuresTest = ['time', 'vesselId']
 
 # Selecting the features
@@ -93,12 +93,20 @@ total_avg_arr_dev = df_avg_arrival_deviation['avg_arrival_deviation'].mean()
 X_train.fillna({'avg_arrival_deviation': total_avg_arr_dev}, inplace = True)
 X_test.fillna({'avg_arrival_deviation': total_avg_arr_dev}, inplace = True)
 
+# Clustering the data based on geographical aspects
+cluster_features_train = X_train[['latitude_vessel', 'longitude_vessel', 'avg_sog']].copy()
+kmeans = KMeans(n_clusters = 5, random_state = 42)
+X_train['cluster'] = kmeans.fit_predict(cluster_features_train)
+vessel_cluster_mapping = X_train[['vesselId', 'cluster']].drop_duplicates()
+X_test = X_test.merge(vessel_cluster_mapping, on = 'vesselId', how = 'left')
+
 # Encoding vesselId
 X_train['vesselId_encoded'] = X_train['vesselId'].apply(stable_hash)
 X_test['vesselId_encoded'] = X_test['vesselId'].apply(stable_hash)
 # Dropping unused columns
-X_train.drop(['vesselId', 'hour', 'minute', 'second', 'time', 'sog', 'navstat', 'NT', 'etaRaw', 'portId'], axis = 1, inplace = True)
+X_train.drop(['vesselId', 'hour', 'minute', 'second', 'time', 'sog', 'navstat', 'NT', 'etaRaw', 'portId', 'longitude_vessel', 'latitude_vessel', 'cluster'], axis = 1, inplace = True)
 X_test.drop(['vesselId', 'hour', 'minute', 'second', 'time', 'NT'], axis = 1, inplace = True)
+
 
 # NOTE: These are functions for running various tuned models.
 def runModelforKaggle(X_train, X_test, y_lat, y_long):
@@ -141,7 +149,7 @@ def runXGBModelforTesting(X, y_lat, y_long):
         'max_depth': 50,
         'random_state': 42,
         'reg_alpha': 0,
-        'reg_lambda': 1,
+        'reg_lambda': 0,
         'n_jobs': -1,
     }
 
