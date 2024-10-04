@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from supportingFcn import toTime, haversine_distance, submit, stable_hash, convert_etaRaw_to_full_datetime
-from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split, GridSearchCV, KFold
 from sklearn.cluster import KMeans
 from sklearn.metrics import root_mean_squared_error, r2_score
@@ -17,20 +17,54 @@ df_ports = pd.read_csv('ports.csv', delimiter = '|')
 df_schedules = pd.read_csv('schedules_to_may_2024.csv', delimiter = '|')
 df_vessels = pd.read_csv('vessels.csv', delimiter = '|')
 
-
-featuresTrain = ['latitude_vessel', 'longitude_vessel', 'time', 'vesselId', 'sog', 'navstat', 'etaRaw', 'portId']
+featuresTrain = ['latitude', 'longitude', 'time', 'vesselId', 'sog', 'navstat', 'etaRaw', 'portId', 'heading']
 featuresTest = ['time', 'vesselId']
 
 # Selecting the features
 X_train = df_train[featuresTrain]
 X_test = df_test[featuresTest]
 # Selecting the predictors
-y_lat = df_train['latitude_vessel']
-y_long = df_train['longitude_vessel']
+y_lat = df_train['latitude']
+y_long = df_train['longitude']
 
 # Splitting time into different features
 X_train = toTime(X_train, 'measured', year = '2024')
 X_test = toTime(X_test, 'measured', year = '2024')
+
+# Adding last day from AIS data
+last_day = X_train.groupby('vesselId').agg({
+    'day': 'last'
+}).reset_index()
+last_day.rename(columns={
+    'day': 'last_day'
+}, inplace = True)
+
+# Adding last known position of vessel
+last_position = X_train.groupby('vesselId').agg({
+    'latitude': 'last',
+    'longitude': 'last'
+}).reset_index()
+last_position.rename(columns={
+    'latitude': 'last_latitude',
+    'longitude': 'last_longitude'
+}, inplace=True)
+
+# Adding last known sog
+last_sog = X_train.groupby('vesselId').agg({
+    'sog': 'last'
+}).reset_index()
+last_sog.rename(columns={
+    'sog': 'last_sog'
+}, inplace = True)
+
+# Adding last known heading
+last_heading = X_train.groupby('vesselId').agg({
+    'heading': 'last'
+}).reset_index()
+last_heading.rename(columns={
+    'heading': 'last_heading'
+}, inplace = True)
+
 
 enginepower_mean = df_vessels['enginePower'].mean()
 df_vessels.fillna({'enginePower': enginepower_mean}, inplace = True)
@@ -41,11 +75,21 @@ df_vessels.fillna({'draft': draft_mean}, inplace = True)
 avg_sog_vessel = X_train[X_train['navstat'] == 0].groupby('vesselId')['sog'].mean().reset_index()
 avg_sog_vessel.columns = ['vesselId', 'avg_sog']
 
-
 # Enriching test/train dataset based on vesselId
 X_train = X_train.merge(df_vessels[['vesselId', 'DWT', 'length', 'GT', 'yearBuilt']], on = 'vesselId', how = 'left')
 X_test = X_test.merge(df_vessels[['vesselId', 'DWT', 'length', 'GT', 'yearBuilt']], on = 'vesselId', how = 'left')
 
+X_train = X_train.merge(last_position[['vesselId','last_latitude', 'last_longitude']], on = 'vesselId', how = 'left')
+X_test = X_test.merge(last_position[['vesselId','last_latitude', 'last_longitude']], on = 'vesselId', how = 'left')
+
+X_train = X_train.merge(last_sog[['vesselId', 'last_sog']], on = 'vesselId', how = 'left')
+X_test = X_test.merge(last_sog[['vesselId', 'last_sog']], on = 'vesselId', how = 'left')
+
+X_train = X_train.merge(last_heading[['vesselId', 'last_heading']], on = 'vesselId', how = 'left')
+X_test = X_test.merge(last_heading[['vesselId', 'last_heading']], on = 'vesselId', how = 'left')
+
+X_train = X_train.merge(last_day[['vesselId', 'last_day']], on = 'vesselId', how = 'left')
+X_test = X_test.merge(last_day[['vesselId', 'last_day']], on = 'vesselId', how = 'left')
 
 X_train = X_train.merge(avg_sog_vessel, on = 'vesselId', how = 'left')
 X_test = X_test.merge(avg_sog_vessel, on = 'vesselId', how = 'left')
@@ -54,7 +98,6 @@ X_test = X_test.merge(avg_sog_vessel, on = 'vesselId', how = 'left')
 avg_sog_mean = avg_sog_vessel['avg_sog'].mean()
 X_train.fillna({'avg_sog': avg_sog_mean}, inplace=True)
 X_test.fillna({'avg_sog': avg_sog_mean}, inplace=True)
-
 
 # Saving average delay per vesselId
 df_arrival_times = X_train[['vesselId', 'time', 'navstat', 'etaRaw']].copy()
@@ -78,31 +121,35 @@ X_train.fillna({'avg_arrival_deviation': total_avg_arr_dev}, inplace = True)
 X_test.fillna({'avg_arrival_deviation': total_avg_arr_dev}, inplace = True)
 
 # Clustering the data based on geographical aspects
-cluster_features_train = X_train[['latitude_vessel', 'longitude_vessel', 'avg_sog']].copy()
-kmeans = KMeans(n_clusters = 40, random_state = 42)
+cluster_features_train = X_train[['latitude', 'longitude', 'avg_sog']].copy()
+kmeans = KMeans(n_clusters = 3, random_state = 42)
 X_train['cluster'] = kmeans.fit_predict(cluster_features_train)
 vessel_cluster_mapping = X_train.groupby('vesselId')['cluster'].agg(lambda x: x.mode()[0]).reset_index()
 X_test = X_test.merge(vessel_cluster_mapping, on = 'vesselId', how = 'left')
-
 
 # Encoding vesselId
 X_train['vesselId_encoded'] = X_train['vesselId'].apply(stable_hash)
 X_test['vesselId_encoded'] = X_test['vesselId'].apply(stable_hash)
 # Dropping unused columns
-X_train.drop(['vesselId', 'hour', 'minute', 'second', 'time', 'sog', 'navstat', 'etaRaw', 'portId', 'longitude_vessel', 'latitude_vessel'], axis = 1, inplace = True)
-X_test.drop(['vesselId', 'hour', 'minute', 'second', 'time'], axis = 1, inplace = True)
+X_train.drop(['vesselId', 'hour', 'minute', 'second', 'time', 'sog', 'navstat', 'etaRaw', 'portId', 
+              'longitude', 'latitude', 'cluster', 'length', 'yearBuilt', 'heading'], axis = 1, inplace = True)
+X_test.drop(['vesselId', 'hour', 'minute', 'second', 'time', 'cluster', 'length', 'yearBuilt'], axis = 1, inplace = True)
 
-
+#print(X_test.columns)
+#print(X_train.columns)
 
 # NOTE: These are functions for running various tuned models.
 def runModelforKaggle(X_train, X_test, y_lat, y_long):
     # Hyperparameters
-    params_lat = {'learning_rate': 0.1, 'max_depth': 10, 'n_estimators': 100, 'reg_alpha': 0, 'reg_lambda': 0}
-    params_long = {'learning_rate': 0.1, 'max_depth': 10, 'n_estimators': 100, 'reg_alpha': 0, 'reg_lambda': 0}
-
+    params = {'learning_rate': 0.08, 
+              'max_depth': 10, 
+              'min_child_weight': 35,
+              'n_estimators': 200, 
+              'reg_alpha': 0, 
+              'reg_lambda': 0}
     # Initializing a XGBRegression model
-    XGBlat = XGBRegressor(**params_lat)
-    XGBlong = XGBRegressor(**params_long)
+    XGBlat = XGBRegressor()
+    XGBlong = XGBRegressor()
 
     # Fitting model for latitude and longitude
     XGBlat.fit(X_train, y_lat)
@@ -123,12 +170,16 @@ def runXGBModelforTesting(X, y_lat, y_long):
         X, y_lat, y_long, test_size=0.2, random_state=42
     )
     # Hyperparameters
-    params_lat = {'learning_rate': 0.1, 'max_depth': 10, 'n_estimators': 100, 'reg_alpha': 0, 'reg_lambda': 0}
-    params_long = {'learning_rate': 0.1, 'max_depth': 10, 'n_estimators': 100, 'reg_alpha': 0, 'reg_lambda': 0}
+    params = {'learning_rate': 0.08, 
+              'max_depth': 10, 
+              'min_child_weight': 35,
+              'n_estimators': 200, 
+              'reg_alpha': 0, 
+              'reg_lambda': 0}
 
     # Initializing a XGBRegression model
-    XGBlat = XGBRegressor(**params_lat)
-    XGBlong = XGBRegressor(**params_long)
+    XGBlat = XGBRegressor()
+    XGBlong = XGBRegressor()
 
     # Fitting model for latitude and longitude
     XGBlat.fit(X_train, y_lat_train)
@@ -156,9 +207,9 @@ def runXGBModelforTesting(X, y_lat, y_long):
     print(f'R² Longitude: {r2_long}')
     print(f'Average Haversine Distance: {haversine_avg} km')
     # NOTE: Below plot can be used to show importance of each feature
-    #plot_importance(XGBlat)
-    #plot_importance(XGBlong)
-    #plt.show()
+    plot_importance(XGBlat)
+    plot_importance(XGBlong)
+    plt.show()
 
 def runTFModelforTesting(X, y_lat, y_long):
     # Splitting the training data into a training and validation set
