@@ -1,14 +1,19 @@
 import pandas as pd
 import numpy as np
 from supportingFcn import toTime, haversine_distance, submit, stable_hash, convert_etaRaw_to_full_datetime
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split, GridSearchCV, KFold
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.model_selection import train_test_split, GridSearchCV, KFold, TimeSeriesSplit
 from sklearn.cluster import KMeans
-from sklearn.metrics import root_mean_squared_error, r2_score
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import root_mean_squared_error, r2_score, mean_squared_error
 import matplotlib.pyplot as plt
 from xgboost import XGBRegressor
 from xgboost import plot_importance
 import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, SimpleRNN, Dropout, Input
+from catboost import CatBoostRegressor
+from tpot import TPOTRegressor
 
 # Load datasets
 df_train = pd.read_csv('ais_train.csv', delimiter = '|')
@@ -132,33 +137,43 @@ X_train['vesselId_encoded'] = X_train['vesselId'].apply(stable_hash)
 X_test['vesselId_encoded'] = X_test['vesselId'].apply(stable_hash)
 # Dropping unused columns
 X_train.drop(['vesselId', 'hour', 'minute', 'second', 'time', 'sog', 'navstat', 'etaRaw', 'portId', 
-              'longitude', 'latitude', 'cluster', 'length', 'yearBuilt', 'heading'], axis = 1, inplace = True)
-X_test.drop(['vesselId', 'hour', 'minute', 'second', 'time', 'cluster', 'length', 'yearBuilt'], axis = 1, inplace = True)
+              'longitude', 'latitude', 'cluster', 'length', 'yearBuilt', 
+              'heading', 'vesselId_encoded', 'DWT', 'GT', 'last_day'], axis = 1, inplace = True)
+X_test.drop(['vesselId', 'hour', 'minute', 'second', 'time', 'cluster', 'length', 'yearBuilt',  
+             'vesselId_encoded', 'DWT', 'GT', 'last_day'], axis = 1, inplace = True)
 
-#print(X_test.columns)
-#print(X_train.columns)
 
 # NOTE: These are functions for running various tuned models.
 def runModelforKaggle(X_train, X_test, y_lat, y_long):
     # Hyperparameters
-    params = {'learning_rate': 0.08, 
-              'max_depth': 10, 
+    params = {'learning_rate': 0.1, 
+              'max_depth': 8, 
               'min_child_weight': 35,
-              'n_estimators': 200, 
+              'n_estimators': 300, 
               'reg_alpha': 0, 
               'reg_lambda': 0}
+    # Hyperparameters
+    params = {'bootstrap': False, 
+              'max_features': 0.05, 
+              'min_samples_leaf': 20,
+              'min_samples_split': 15, 
+              'n_estimators': 100,
+              'n_jobs': -1,
+              'verbose': 2
+              }
+
     # Initializing a XGBRegression model
-    XGBlat = XGBRegressor()
-    XGBlong = XGBRegressor()
+    RFRlat = RandomForestRegressor(bootstrap=True, max_features=0.05, min_samples_leaf=7, min_samples_split=13, n_estimators=100)
+    RFRlong = RandomForestRegressor(bootstrap=True, max_features=0.05, min_samples_leaf=7, min_samples_split=13, n_estimators=100)
 
     # Fitting model for latitude and longitude
-    XGBlat.fit(X_train, y_lat)
-    XGBlong.fit(X_train, y_long)
+    RFRlat.fit(X_train, y_lat)
+    RFRlong.fit(X_train, y_long)
 
     # Predicting on test set
-    y_lat_pred = XGBlat.predict(X_test)
+    y_lat_pred = RFRlat.predict(X_test)
     y_lat_pred = np.clip(y_lat_pred, -90, 90) # Clipping as the model initially might predict values out of bounds
-    y_long_pred = XGBlong.predict(X_test)
+    y_long_pred = RFRlong.predict(X_test)
     y_long_pred = np.clip(y_long_pred, -180, 180) # Clipping as the model initially might predict values out of bounds
     
     # Creating a CSV output file
@@ -170,16 +185,16 @@ def runXGBModelforTesting(X, y_lat, y_long):
         X, y_lat, y_long, test_size=0.2, random_state=42
     )
     # Hyperparameters
-    params = {'learning_rate': 0.08, 
-              'max_depth': 10, 
+    params = {'learning_rate': 0.1, 
+              'max_depth': 8, 
               'min_child_weight': 35,
-              'n_estimators': 200, 
+              'n_estimators': 300, 
               'reg_alpha': 0, 
               'reg_lambda': 0}
 
     # Initializing a XGBRegression model
-    XGBlat = XGBRegressor()
-    XGBlong = XGBRegressor()
+    XGBlat = XGBRegressor(**params)
+    XGBlong = XGBRegressor(**params)
 
     # Fitting model for latitude and longitude
     XGBlat.fit(X_train, y_lat_train)
@@ -210,6 +225,52 @@ def runXGBModelforTesting(X, y_lat, y_long):
     plot_importance(XGBlat)
     plot_importance(XGBlong)
     plt.show()
+
+def runRFR(X, y_lat, y_long):
+    # Splitting the training data into a training and validation set
+    X_train, X_val, y_lat_train, y_lat_val, y_long_train, y_long_val = train_test_split(
+        X, y_lat, y_long, test_size=0.2, random_state=42
+    )
+    # Hyperparameters
+    params = {'bootstrap': False, 
+              'max_features': 0.05, 
+              'min_samples_leaf': 20,
+              'min_samples_split': 15, 
+              'n_estimators': 100,
+              'n_jobs': -1,
+              'verbose': 2
+              }
+
+    # Initializing a XGBRegression model
+    RFRlat = RandomForestRegressor(bootstrap=True, max_features=0.05, min_samples_leaf=7, min_samples_split=13, n_estimators=100)
+    RFRlong = RandomForestRegressor(bootstrap=True, max_features=0.05, min_samples_leaf=7, min_samples_split=13, n_estimators=100)
+
+    # Fitting model for latitude and longitude
+    RFRlat.fit(X_train, y_lat_train)
+    RFRlong.fit(X_train, y_long_train)
+
+    # Predicting on test set
+    y_lat_pred = RFRlat.predict(X_val)
+    y_lat_pred = np.clip(y_lat_pred, -90, 90) # Clipping as the model initially might predict values out of bounds
+    y_long_pred = RFRlong.predict(X_val)
+    y_long_pred = np.clip(y_long_pred, -180, 180) # Clipping as the model initially might predict values out of bounds
+
+    # Calculate the Haversine distance
+    haversine_avg = round(haversine_distance(y_lat_val, y_long_val, y_lat_pred, y_long_pred), 2)
+
+    # Evaluate the model performance
+    rmse_lat = round(root_mean_squared_error(y_lat_val, y_lat_pred), 2)
+    rmse_long = round(root_mean_squared_error(y_long_val, y_long_pred), 2)
+    # Calculate R² score
+    r2_lat = round(r2_score(y_lat_val, y_lat_pred), 2)
+    r2_long = round(r2_score(y_long_val, y_long_pred), 2)
+
+    print(f'RMSE Latitude: {rmse_lat}')
+    print(f'RMSE Longitude: {rmse_long}')
+    print(f'R² Latitude: {r2_lat}')
+    print(f'R² Longitude: {r2_long}')
+    print(f'Average Haversine Distance: {haversine_avg} km')
+    # NOTE: Below plot can be used to show importance of each feature
 
 def runTFModelforTesting(X, y_lat, y_long):
     # Splitting the training data into a training and validation set
@@ -354,7 +415,169 @@ def runGridCV(X, y_lat, y_long):
     # plot_importance(grid_search_lat.best_estimator_)
     # plt.show()
 
+def runRNN(X, y_lat, y_long):
+    # Splitting the dataset into train and test sets
+    X_train, X_val, y_lat_train, y_lat_val, y_long_train, y_long_val = train_test_split(X, y_lat, y_long, test_size=0.2, random_state=42)
+
+    # Scaling the features and targets using MinMaxScaler
+    scaler_X = MinMaxScaler()
+    scaler_y = MinMaxScaler()
+
+    # Scale inputs
+    X_train_scaled = scaler_X.fit_transform(X_train)
+    X_val_scaled = scaler_X.transform(X_val)
+
+    # Scale latitude and longitude targets together
+    y_train = np.column_stack((y_lat_train, y_long_train))
+    y_val = np.column_stack((y_lat_val, y_long_val))
+
+    y_train_scaled = scaler_y.fit_transform(y_train)
+    y_val_scaled = scaler_y.transform(y_val)
+
+    # Reshaping the scaled inputs to 3D for RNN input
+    X_train_scaled = X_train_scaled.reshape((X_train_scaled.shape[0], 1, X_train_scaled.shape[1]))
+    X_val_scaled = X_val_scaled.reshape((X_val_scaled.shape[0], 1, X_val_scaled.shape[1]))
+
+    # Building the RNN model
+    model = Sequential()
+
+    # Define the input layer explicitly
+    model.add(Input(shape=(X_train_scaled.shape[1], X_train_scaled.shape[2])))
+    
+    # Add a Simple RNN layer with 50 units
+    model.add(SimpleRNN(units=50, input_shape=(X_train_scaled.shape[1], X_train_scaled.shape[2])))
+    
+    # Dropout to avoid overfitting
+    model.add(Dropout(0.2))
+    
+    # Dense layer to output two features (latitude and longitude)
+    model.add(Dense(units=2, activation='linear'))
+
+    # Compile the model
+    model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+    
+    # Train the model
+    history = model.fit(X_train_scaled, y_train, epochs=20, batch_size=32, validation_data=(X_val_scaled, y_val))
+
+    # Evaluate the model
+    val_loss, val_mae = model.evaluate(X_val_scaled, y_val)
+    print(f'Validation Loss: {val_loss}, Validation MAE: {val_mae}')
+
+    # Making predictions
+    y_pred = model.predict(X_val_scaled)
+    
+    # Separate latitude and longitude predictions
+    y_lat_pred = y_pred[:, 0]
+    y_long_pred = y_pred[:, 1]
+    # Clipping as the model initially might predict values out of bounds
+    y_lat_pred = np.clip(y_lat_pred, -90, 90)
+    y_long_pred = np.clip(y_long_pred, -180, 180)
+
+def runCatBoost(X, y_lat, y_long):
+    # Splitting the training data into a training and validation set
+    X_train, X_val, y_lat_train, y_lat_val, y_long_train, y_long_val = train_test_split(
+        X, y_lat, y_long, test_size=0.2, random_state=42
+    )
+
+    cat_features = ['vesselId_encoded']
+
+    params = {
+        'iterations': 1000, 
+        'learning_rate': 0.05, 
+        'depth': 6, 
+        'l2_leaf_reg': 3, 
+        'cat_features': cat_features
+    }
+    CBlat = CatBoostRegressor(**params)
+    CBlong = CatBoostRegressor(**params)
+
+    CBlat.fit(X_train, y_lat_train)
+    CBlong.fit(X_train, y_long_train)
+
+    y_lat_pred = CBlat.predict(X_val)
+    y_lat_pred = np.clip(y_lat_pred, -90, 90) # Clipping as the model initially might predict values out of bounds
+    y_long_pred = CBlong.predict(X_val)
+    y_long_pred = np.clip(y_long_pred, -180, 180)
+
+    # Calculate the Haversine distance
+    haversine_avg = round(haversine_distance(y_lat_val, y_long_val, y_lat_pred, y_long_pred), 2)
+
+    # Evaluate the model performance
+    rmse_lat = round(root_mean_squared_error(y_lat_val, y_lat_pred), 2)
+    rmse_long = round(root_mean_squared_error(y_long_val, y_long_pred), 2)
+    # Calculate R² score
+    r2_lat = round(r2_score(y_lat_val, y_lat_pred), 2)
+    r2_long = round(r2_score(y_long_val, y_long_pred), 2)
+
+    print(f'RMSE Latitude: {rmse_lat}')
+    print(f'RMSE Longitude: {rmse_long}')
+    print(f'R² Latitude: {r2_lat}')
+    print(f'R² Longitude: {r2_long}')
+    print(f'Average Haversine Distance: {haversine_avg} km')
+    # NOTE: Below plot can be used to show importance of each feature
+    plot_importance(CBlat)
+    plot_importance(CBlong)
+    plt.show()
+
+def runTPOT(X, y_lat, y_long):
+    # Split the data into training and testing datasets for TPOT
+    X_train, X_val, y_lat_train, y_lat_val, y_long_train, y_long_val = train_test_split(
+        X, y_lat, y_long, test_size=0.2, random_state=42
+        )
+
+    # Initialize TPOT Regressor for latitude prediction
+    tpot_lat = TPOTRegressor(
+        generations=3,        # Number of iterations to run (change for more exhaustive search)
+        population_size=5,   # Population size for genetic programming
+        verbosity=2,          # Show progress
+        random_state=42,      # Ensures reproducibility
+        scoring='neg_mean_squared_error'  # Using MSE as scoring metric
+    )
+
+    # Fit TPOT model
+    tpot_lat.fit(X_train, y_lat_train)
+
+    # Predict on the validation set
+    y_lat_pred = tpot_lat.predict(X_val)
+
+    # Evaluate model performance
+    rmse_lat = mean_squared_error(y_lat_val, y_lat_pred, squared=False)
+    print(f'RMSE Latitude: {rmse_lat}')
+
+    # Export the best pipeline as a Python script
+    tpot_lat.export('tpot_latitude_pipeline.py')
+
+    # You can repeat the process for longitude
+    y_long = df_train['longitude']
+    X_train, X_val, y_long_train, y_long_val = train_test_split(X_train, y_long, test_size=0.2, random_state=42)
+
+    # Initialize TPOT Regressor for longitude prediction
+    tpot_long = TPOTRegressor(
+        generations=5,
+        population_size=20,
+        verbosity=2,
+        random_state=42,
+        scoring='neg_mean_squared_error'
+    )
+
+    # Fit TPOT model
+    tpot_long.fit(X_train, y_long_train)
+
+    # Predict on the validation set
+    y_long_pred = tpot_long.predict(X_val)
+
+    # Evaluate model performance
+    rmse_long = mean_squared_error(y_long_val, y_long_pred, squared=False)
+    print(f'RMSE Longitude: {rmse_long}')
+
+    # Export the best pipeline for longitude as well
+    tpot_long.export('tpot_longitude_pipeline.py')
+
 runModelforKaggle(X_train, X_test, y_lat, y_long)
 #runXGBModelforTesting(X_train, y_lat, y_long)
+#runRFR(X_train, y_lat, y_long)
+#runCatBoost(X_train, y_lat, y_long)
+#runRNN(X_train, y_lat, y_long)
 #runTFModelforTesting(X_train, y_lat, y_long)
 #runGridCV(X_train, y_lat, y_long)
+#runTPOT(X_train, y_lat, y_long)
